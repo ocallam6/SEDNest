@@ -7,7 +7,9 @@ from dustapprox.io import svo
 import pickle
 import sys
 import numpy as np
+import astropy.units as u 
 from astropy.units import R_sun,pc
+
 sys.path.append('../')
 from utils import atmosphere_interpolators
 class SEDNest:
@@ -36,12 +38,17 @@ class SEDNest:
         self.lamb_unit_location='../Data/lamb_unit.txt'
         self.flux_unit_location='../Data/flux_unit.txt'
         self.wavelength_location='../Data/wavelength.npy'
-        self.interpolation_details=['ATLAS9','LINEAR']
+        self.interpolation_details=['PHOENIX','LINEAR']#['ATLAS9','LINEAR'] 
         self.atmosphere_interpolator,self.atmosphere_lamb_unit,self.atmosphere_flux_unit,self.wavelength=self._initialise_interpolator(**kwargs)
-    
+        #remove later
+        #units !!
+        if(self.atmosphere_flux_unit=='FLAM'):
+            self.atmosphere_flux_unit=u.erg/u.s/u.cm**2/u.AA
         #Flux preparation
-        if(self.passbands[0].wavelength_unit==str(self.atmosphere_lamb_unit)):
-            self.transmission_arrays=np.array([np.nan_to_num(self.passbands[passband](self.wavelength*self.atmosphere_lamb_unit,1*self.atmosphere_flux_unit),nan=0.0) for passband in range(len(self.dustapprox_filters))])
+        if(u.AA==self.atmosphere_lamb_unit):
+            
+            self.transmission_arrays=np.array([self.passbands[passband](self.wavelength,1*self.atmosphere_flux_unit) for passband in range(len(self.dustapprox_filters))])
+            print(self.transmission_arrays[0])
             self.denominator_flux=np.array([np.trapz(x=self.wavelength,y=self.wavelength*self.transmission_arrays[i]) for i in range(len(self.transmission_arrays))])
             self.vega_zero_fluxes=np.array([passband.Vega_zero_flux.value for passband in self.passbands])
         else:
@@ -56,7 +63,7 @@ class SEDNest:
         Uses an extinction law from the extinciton package
         Fluxes need to be in correct unit
         '''
-        if(str(self.passbands[0].wavelength_unit)==str(self.atmosphere_lamb_unit)):
+        if(u.AA==self.atmosphere_lamb_unit):
             if(np.array(distance).shape==()):
                 radius,distance,a0=np.array(radius).reshape(1),np.array(distance).reshape(1),np.array(a0).reshape(1)
 
@@ -65,7 +72,7 @@ class SEDNest:
 
 
             numerator=(self.wavelength[None,:]*extincted_flux)[:,:,None]*self.transmission_arrays.T[None,:,:]
-            return (np.trapz(y=numerator,x=self.wavelength[None,:]*self.atmosphere_lamb_unit,axis=1)/self.denomenator)/self.vega_zero_fluxes
+            return (np.trapz(y=numerator,x=self.wavelength[:]*self.atmosphere_lamb_unit,axis=1)/self.denominator_flux)/self.vega_zero_fluxes
         else:
             print('Unit error!!!')
             raise NotImplementedError
@@ -118,6 +125,7 @@ class SEDNest:
         if(self._load_filter_names()):
             try:
                 with open(self.loc_passbands, 'rb') as file:
+                    print('Transmission Functions Loaded')
                     data = pickle.load(file)
                     return data
             except FileNotFoundError:
@@ -165,6 +173,7 @@ class SEDNest:
         This assumes constant passbands.
         '''
         if(self._load_interpolation_parameters()):
+            self.interpolator_location=self.interpolator_location+'_' + self.interpolation_details[0]+'_'+self.interpolation_details[1]
             try:
                 print('Pickle interpolator file exists')
                 with open(self.interpolator_location, 'rb') as file:
@@ -188,6 +197,7 @@ class SEDNest:
                     np.save(self.wavelength_location,wavelength)                    
                     return self._initialise_interpolator()
         else:
+            self.interpolator_location=self.interpolator_location+'_' + self.interpolation_details[0]+'_'+self.interpolation_details[1]
             self._save_interpolation_parameters()
             print('Different combination parameters')
             print('Creating interpolator pickle file')
@@ -203,12 +213,23 @@ class SEDNest:
 
     def _interpolator_choice(self,atmospheres,how):
         if(atmospheres=='ATLAS9' and how=='LINEAR'):
+            print("Generating ATLAS9 Linear")
             return atmosphere_interpolators.atlas_linear()
+        elif(atmospheres=='PHOENIX' and how=='LINEAR'):
+            print("Generating Phoenix Linear")
+            return atmosphere_interpolators.phoenix_linear()
         else:
             raise NotImplementedError
 
 
     def _save_interpolation_parameters(self):
+        try:
+            with open(self.atmosphere_names_location, 'r') as file:
+                    loaded_interpolator = [line.strip() for line in file]
+            loaded_interpolator=loaded_interpolator.append(self.interpolation_details[0])
+            loaded_interpolator=loaded_interpolator.append(self.interpolation_details[0])
+        except: 
+            print('No File Available for  Interpolator Properties')
         with open(self.atmosphere_names_location, 'w') as file:
             for param in self.interpolation_details:
                 file.write(param + '\n')
@@ -217,11 +238,13 @@ class SEDNest:
         try:
             with open(self.atmosphere_names_location, 'r') as file:
                 loaded_interpolator = [line.strip() for line in file]
+                print(loaded_interpolator)
         except:
             return False
 
         # Check if loaded filters match expected filters
-        if loaded_interpolator == self.interpolation_details:
+        truth=(self.interpolation_details[0] in loaded_interpolator)*(self.interpolation_details[1] in loaded_interpolator)
+        if truth:
             return True
         else:
             return False
@@ -241,7 +264,7 @@ class SEDNest_ISO(SEDNest):
 
         '''
         super().__init__(*args, **kwargs)
-
+        self.data_prefix=''
         self.isochrones_avail=['mist']
         self.isochrone_type = kwargs.get('isochrone_type', None)
         if isinstance(self.isochrone_type, str) and self.isochrone_type == "mist":
@@ -279,7 +302,7 @@ class SEDNest_ISO(SEDNest):
         return stellar_model_parameters
 
 
-
-
-
-print(SEDNest(use_isochrones=True).interpolate_spectra(feh=np.array([0,-1]),teff=np.array([5000,7000]),logg=np.array([4.5,4.7])).shape)
+x=SEDNest(use_isochrones=True)
+import matplotlib.pyplot as plt
+plt.plot(x.wavelength,x.interpolate_spectra(feh=np.array([0]),teff=np.array([5000]),logg=np.array([4.5]))[0])
+print(-2.5*np.log10(x.vega_flux(x.interpolate_spectra(feh=0,teff=5000,logg=4.5)[0],radius=1,distance=10,a0=0,Rv=3.1).value))
