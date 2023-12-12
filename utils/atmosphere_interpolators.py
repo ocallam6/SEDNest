@@ -4,12 +4,13 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.interpolate import RegularGridInterpolator
 import astropy.units as u
+import glob
 # Model for Creating Interpolators for Spectra.
 
 def atlas_linear():
 
     loc='/Users/mattocallaghan/VaeStar/Isochrones_data/Kurucz2003all/*.fl.dat.txt'
-    models = glob(loc)
+    models = glob.glob(loc)
     apfields = ['teff', 'logg', 'feh', 'alpha']
     wl=[]
     fehs=[]
@@ -51,11 +52,58 @@ def atlas_linear():
     
     interp=RegularGridInterpolator((feh_unique,logg_unique,teff_unique),flux_grid,method='linear',
                                     bounds_error=False, fill_value=np.NaN)  
-    wavelength=u.AA*wl[0] 
+    wavelength=wl[0] 
                        
     return [interp,u.AA,flux_unit,np.array(wavelength)]
 
+def atlas_cubic():
 
+    loc='/Users/mattocallaghan/VaeStar/Isochrones_data/Kurucz2003all/*.fl.dat.txt'
+    models = glob.glob(loc)
+    apfields = ['teff', 'logg', 'feh', 'alpha']
+    wl=[]
+    fehs=[]
+    logg=[]
+    teff=[]
+    fluxes=[]
+
+    label = 'teff={teff:4g} K, logg={logg:0.1g} dex, [Fe/H]={feh:0.1g} dex'
+    for fname in models:
+        data = svo.spectra_file_reader(fname)
+        lamb_unit, flux_unit = svo.get_svo_sprectum_units(data)
+        lamb = data['data']['WAVELENGTH'].values * lamb_unit
+        truth=(data['data']['WAVELENGTH']<60000)*(data['data']['WAVELENGTH']>2000)
+        data['data'][truth]
+        if(data['alpha']['value']==0.0):
+            wl.append(data['data'][truth]['WAVELENGTH'].values)#.reshape(-1, 2).mean(-1))
+            fluxes.append(data['data'][truth]['FLUX'].values)#.reshape(-1, 2).mean(-1))
+            fehs.append(data['feh']['value'])
+            logg.append(data['logg']['value'])
+            teff.append(data['teff']['value'])
+            #flux=flux*curves[1](data['data']['WAVELENGTH'].values * lamb_unit,av,Rv=Rv)
+    
+    pars=np.stack([np.array(fehs),np.array(logg),np.array(teff)]).T
+    feh_unique=np.unique(np.array(fehs))
+    logg_unique=np.unique(np.array(logg))
+    teff_unique=np.unique(np.array(teff))
+    
+    parameters=np.stack(np.meshgrid(feh_unique,logg_unique,teff_unique,indexing='ij'),axis=-1)
+
+    flux_grid=(np.zeros((parameters.shape[:-1]+(len(wl[0]),)))*np.NaN)
+    indices=[]
+    for i,j,k in np.ndindex((parameters.shape[0:-1])):
+        try:
+            idx=np.where([(np.prod(pars[_]==parameters[i,j,k])) for _ in range(len(pars))])[0]
+            flux_grid[i,j,k]=fluxes[int(idx)]
+            indices.append(np.array([i,j,k]))
+        except:
+            continue
+    
+    interp=RegularGridInterpolator((feh_unique,logg_unique,teff_unique),np.nan_to_num(flux_grid,nan=0.0),method='cubic',
+                                    bounds_error=False, fill_value=0.0)  
+    wavelength=wl[0] 
+                       
+    return [interp,u.AA,flux_unit,np.array(wavelength)]
 
 #####
 #Phoenix
@@ -197,5 +245,47 @@ def phoenix_linear():
     
     interp=RegularGridInterpolator((feh_unique,logg_unique,teff_unique),flux_grid,method='linear',
                                     bounds_error=False, fill_value=np.NaN)  
-    wavelength=wavelengths *u.AA # convert to nm
+    wavelength=wavelengths# convert to nm
+    return [interp,u.AA,sp_zero_flux['FLUX_UNIT'].values[0],wavelength]
+
+
+
+def phoenix_cubic():
+    _phoenix_to_csv()
+    sp_zero_flux=pd.read_csv('../Data/phoenix_with_cuts')
+    par1=fits.read('/Users/mattocallaghan/SEDNest/Data/Phoenix/phoenixm05_5000.fits',columns=['WAVELENGTH'])
+    wavelengths=pd.DataFrame(np.stack(np.array(par1,dtype=object)).astype(float),columns=['WAVELENGTH'])
+    wavelengths=wavelengths[wavelengths['WAVELENGTH'].values<wavelength_cut].values[:,0] # weird shape
+    pars=np.stack([sp_zero_flux['MH'].astype(float).values,sp_zero_flux['LOGG'].astype(float).values,sp_zero_flux['TEFF'].astype(float).values]).T
+    feh_unique=np.unique(sp_zero_flux['MH'].astype(float).values)
+    logg_unique=np.unique(sp_zero_flux['LOGG'].astype(float).values)
+    teff_unique=np.unique(sp_zero_flux['TEFF'].astype(float).values)
+    with open('../Data/phoenix_fluxes', 'rb') as file:
+        fluxes = pickle.load(file)
+
+    pars=np.stack([sp_zero_flux['MH'].astype(float).values,sp_zero_flux['LOGG'].astype(float).values,sp_zero_flux['TEFF'].astype(float).values]).T
+    feh_unique=np.unique(sp_zero_flux['MH'].astype(float).values)
+    logg_unique=np.unique(sp_zero_flux['LOGG'].astype(float).values)
+    teff_unique=np.unique(sp_zero_flux['TEFF'].astype(float).values)
+    #fluxes=sp_zero_flux['FLUX'].astype(float).values
+    parameters=np.stack(np.meshgrid(feh_unique,logg_unique,teff_unique,indexing='ij'),axis=-1)
+    flux_grid=(np.zeros((parameters.shape[:-1]+(len(wavelengths),)))*np.NaN)
+    indices=[]
+    for i,j,k in np.ndindex((parameters.shape[0:-1])):
+
+        idx=np.where([(np.prod(pars[_]==parameters[i,j,k])) for _ in range(len(pars))])[0]
+        if(len(idx)>0):
+            f=fluxes[int(idx)]
+            try:
+                flux_grid[i,j,k]=fluxes[int(idx)][:,0]
+                indices.append(np.array([i,j,k]))
+            except:
+                flux_grid[i,j,k]=fluxes[int(idx)][:]
+                indices.append(np.array([i,j,k]))
+
+        
+    
+    interp=RegularGridInterpolator((feh_unique,logg_unique,teff_unique),np.nan_to_num(flux_grid,nan=0.0),method='cubic',
+                                    bounds_error=False, fill_value=0.0)  
+    wavelength=wavelengths# convert to nm
     return [interp,u.AA,sp_zero_flux['FLUX_UNIT'].values[0],wavelength]

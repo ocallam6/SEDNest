@@ -1,4 +1,6 @@
 #Class to implement the SED Fit
+from cProfile import label
+from time import process_time_ns
 import warnings
 import minimint # for isochrone theory interpolator
 import astropy
@@ -8,12 +10,11 @@ import pickle
 import sys
 import numpy as np
 import astropy.units as u 
-from astropy.units import R_sun,pc
-
+from astropy.constants import R_sun,pc
 sys.path.append('../')
-from utils import atmosphere_interpolators
+from utils import atmosphere_interpolators,atmosphere_model_residuals
 class SEDNest:
-    def __init__(self,filters='default',use_isochrones=False,*args, **kwargs):
+    def __init__(self,filters='default',use_isochrones=False,interpolation_details=['PHOENIX','LINEAR'],*args, **kwargs):
         '''
         Create a Class of the SED Nested sampling fitter. 
         The extinction law must be taken from the extinction python package
@@ -34,28 +35,36 @@ class SEDNest:
         #Atmosphere Model Interpolatrion Scheme
         #todo, bring in so that will store and save unique interpolation models etc.
         self.atmosphere_names_location='../Data/atmosphere_names.txt'
-        self.interpolator_location='../Data/model_atmosphere_interpolator'
+        self.interpolator_location_base='../Data/model_atmosphere_interpolator'
         self.lamb_unit_location='../Data/lamb_unit.txt'
         self.flux_unit_location='../Data/flux_unit.txt'
-        self.wavelength_location='../Data/wavelength.npy'
-        self.interpolation_details=['PHOENIX','LINEAR']#['ATLAS9','LINEAR'] 
+        self.wavelength_location_base='../Data/wavelength'
+        self.interpolation_details=interpolation_details#['PHOENIX','LINEAR']#['ATLAS9','LINEAR'] 
+        self.interpolator_location=self.interpolator_location_base+'_' + self.interpolation_details[0]+'_'+self.interpolation_details[1]
+        self.wavelength_location=self.wavelength_location_base+'_'+self.interpolation_details[0]
         self.atmosphere_interpolator,self.atmosphere_lamb_unit,self.atmosphere_flux_unit,self.wavelength=self._initialise_interpolator(**kwargs)
         #remove later
         #units !!
+      
         if(self.atmosphere_flux_unit=='FLAM'):
             self.atmosphere_flux_unit=u.erg/u.s/u.cm**2/u.AA
         #Flux preparation
         if(u.AA==self.atmosphere_lamb_unit):
             
-            self.transmission_arrays=np.array([self.passbands[passband](self.wavelength,1*self.atmosphere_flux_unit) for passband in range(len(self.dustapprox_filters))])
-            print(self.transmission_arrays[0])
-            self.denominator_flux=np.array([np.trapz(x=self.wavelength,y=self.wavelength*self.transmission_arrays[i]) for i in range(len(self.transmission_arrays))])
-            self.vega_zero_fluxes=np.array([passband.Vega_zero_flux.value for passband in self.passbands])
+            self.transmission_arrays=np.array([self.passbands[passband](self.wavelength*self.atmosphere_lamb_unit,1*self.atmosphere_flux_unit) for passband in range(len(self.dustapprox_filters))])
+            self.denominator_flux=((u.AA)**2)*np.array([np.trapz(x=self.wavelength,y=self.wavelength*self.transmission_arrays[i])for i in range(len(self.transmission_arrays))])
+            self.vega_zero_fluxes=self.atmosphere_flux_unit*np.array([passband.Vega_zero_flux.value for passband in self.passbands])
         else:
             raise NotImplementedError
         # Extinction Law
         self.extinction_law=self._initialise_extinction_law()
     
+
+    def photometry_vega(self,feh,teff,logg,radius,distance,a0,Rv):
+        ### FEH === MH im assuming probably wrongly
+        atmosphere_fluxes=self.interpolate_spectra(feh,teff,logg)
+        return -2.5*np.log10(self.vega_flux(atmosphere_fluxes,radius,distance,a0,Rv))
+
     def vega_flux(self,atmosphere_fluxes,radius,distance,a0,Rv):
         '''
         Calculate the Vega flux using the Dustapprox/Pyphot method
@@ -67,12 +76,15 @@ class SEDNest:
             if(np.array(distance).shape==()):
                 radius,distance,a0=np.array(radius).reshape(1),np.array(distance).reshape(1),np.array(a0).reshape(1)
 
-            flux_values=(atmosphere_fluxes*(radius[:,None]*R_sun)**2/(distance[:,None]*pc)**2)
-            extincted_flux=np.array(flux_values*(10**(-0.4*np.matmul(a0[:,None],self.extinction_law(self.wavelength,1.0,Rv,'aa')[None,:]))))
+            flux_values=(atmosphere_fluxes*(radius[:,None]*R_sun.value)**2/(distance[:,None]*pc.value)**2) #unit flux
+            
+            extincted_flux=np.array(flux_values*(10**(-0.4*np.matmul(a0[:,None],self.extinction_law(self.wavelength,1.0,Rv,'aa')[None,:])))) #unit flux
+            
+            numerator=(self.wavelength[None,:]*extincted_flux)[:,:,None]*self.transmission_arrays.T[None,:,:] #unit wavelength*flux
+            #return np.trapz(y=numerator,x=self.wavelength[:],axis=1)
+            #integrand has unit wavlendth squared flux
 
-
-            numerator=(self.wavelength[None,:]*extincted_flux)[:,:,None]*self.transmission_arrays.T[None,:,:]
-            return (np.trapz(y=numerator,x=self.wavelength[:]*self.atmosphere_lamb_unit,axis=1)/self.denominator_flux)/self.vega_zero_fluxes
+            return (self.atmosphere_lamb_unit)**2*(self.atmosphere_flux_unit)*(np.trapz(y=numerator,x=self.wavelength[:],axis=1)/self.denominator_flux)/self.vega_zero_fluxes
         else:
             print('Unit error!!!')
             raise NotImplementedError
@@ -173,7 +185,6 @@ class SEDNest:
         This assumes constant passbands.
         '''
         if(self._load_interpolation_parameters()):
-            self.interpolator_location=self.interpolator_location+'_' + self.interpolation_details[0]+'_'+self.interpolation_details[1]
             try:
                 print('Pickle interpolator file exists')
                 with open(self.interpolator_location, 'rb') as file:
@@ -182,7 +193,7 @@ class SEDNest:
                     lamb_unit = pickle.load(file)
                 with open(self.flux_unit_location, 'rb') as file:
                     flux_unit = pickle.load(file)
-                wavelength=np.load(self.wavelength_location)
+                wavelength=np.load(self.wavelength_location+'.npy')
                 return interpolator,lamb_unit,flux_unit,wavelength
             except FileNotFoundError:
                     print(f"File not found: {self.interpolator_location}")
@@ -197,7 +208,6 @@ class SEDNest:
                     np.save(self.wavelength_location,wavelength)                    
                     return self._initialise_interpolator()
         else:
-            self.interpolator_location=self.interpolator_location+'_' + self.interpolation_details[0]+'_'+self.interpolation_details[1]
             self._save_interpolation_parameters()
             print('Different combination parameters')
             print('Creating interpolator pickle file')
@@ -218,6 +228,12 @@ class SEDNest:
         elif(atmospheres=='PHOENIX' and how=='LINEAR'):
             print("Generating Phoenix Linear")
             return atmosphere_interpolators.phoenix_linear()
+        if(atmospheres=='ATLAS9' and how=='CUBIC'):
+            print("Generating ATLAS9 Cubic")
+            return atmosphere_interpolators.atlas_cubic()
+        elif(atmospheres=='PHOENIX' and how=='CUBIC'):
+            print("Generating Phoenix Cubic")
+            return atmosphere_interpolators.phoenix_cubic()
         else:
             raise NotImplementedError
 
@@ -227,7 +243,7 @@ class SEDNest:
             with open(self.atmosphere_names_location, 'r') as file:
                     loaded_interpolator = [line.strip() for line in file]
             loaded_interpolator=loaded_interpolator.append(self.interpolation_details[0])
-            loaded_interpolator=loaded_interpolator.append(self.interpolation_details[0])
+            loaded_interpolator=loaded_interpolator.append(self.interpolation_details[1])
         except: 
             print('No File Available for  Interpolator Properties')
         with open(self.atmosphere_names_location, 'w') as file:
@@ -248,6 +264,8 @@ class SEDNest:
             return True
         else:
             return False
+    
+
 
 class SEDNest_ISO(SEDNest):
     def __init__(self, *args, **kwargs):
@@ -302,7 +320,13 @@ class SEDNest_ISO(SEDNest):
         return stellar_model_parameters
 
 
-x=SEDNest(use_isochrones=True)
-import matplotlib.pyplot as plt
-plt.plot(x.wavelength,x.interpolate_spectra(feh=np.array([0]),teff=np.array([5000]),logg=np.array([4.5]))[0])
-print(-2.5*np.log10(x.vega_flux(x.interpolate_spectra(feh=0,teff=5000,logg=4.5)[0],radius=1,distance=10,a0=0,Rv=3.1).value))
+
+
+
+
+x1=SEDNest(interpolation_details=['PHOENIX','LINEAR'])
+
+x2=SEDNest(interpolation_details=['ATLAS9','LINEAR'])
+#print(x2.photometry_vega(0,4500,4.5,radius=1,distance=10,a0=0,Rv=3.1))
+#print(x1.photometry_vega(0,4500,4.5,radius=1,distance=10,a0=0,Rv=3.1))
+print(np.array(atmosphere_model_residuals.target_systematic_between_atlas_phoenix_linear(x1,x2)).mean(axis=0))
